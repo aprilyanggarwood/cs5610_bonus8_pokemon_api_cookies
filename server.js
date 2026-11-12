@@ -1,55 +1,51 @@
-// cs5610_bonus7_pokemon_api — Pokemon API
+// cs5610_bonus8_pokemon_api_cookies
 // Author: April Yang
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { HTTPException } from 'hono/http-exception';
+import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
 import { db } from './db.js';
-import { createPokemon, listPokemon, findPokemon, updatePokemon, deletePokemon } from './models/pokemon.js';
+import { createPokemon, listPokemon, findPokemon, deletePokemon } from './models/pokemon.js';
 
 const app = new Hono();
 
-app.get('/', (c) => c.text('Pokemon API is running'));
+// in-memory user store (assignment: "create a new array for user data")
+const users = [];
 
-// LIST all pokemon, optionally filtered by owner
+// returns the logged-in username, or throws 401 if there's no cookie
+function requireUser(c) {
+  const username = getCookie(c, 'username');
+  if (!username) {
+    throw new HTTPException(401, { message: 'not logged in' });
+  }
+  return username;
+}
+
 app.get('/api/pokemon', async (c) => {
-  const owner = c.req.query('owner');   // 'April' from ?owner=April, or undefined
-  const all = await listPokemon(owner);
+  const username = requireUser(c);          // 401 if no cookie
+  const all = await listPokemon(username);  // reuse your owner-filtering model
   return c.json(all);
 });
 
-// GET one pokemon by id
-app.get('/api/pokemon/:id', async (c) => {
-  const id = c.req.param('id');
-  const pokemon = await findPokemon(id);
 
-  if (!pokemon) {
-    throw new HTTPException(404, { message: 'Pokemon not found' });
-  }
-
-  return c.json(pokemon);
-});
-
-// CREATE a pokemon
 app.post('/api/pokemon', async (c) => {
+  const username = requireUser(c);          // 401 if no cookie
   const body = await c.req.json();
 
-  // --- validate at the edge (before touching the database) ---
-  // species and owner must be present (never falsy)
-  if (!body.species || !body.owner) {
-    throw new HTTPException(400, { message: 'species and owner are required' });
+  // species still required; owner now comes from the cookie, not the body
+  if (!body.species) {
+    throw new HTTPException(400, { message: 'species is required' });
   }
-  // the client must NOT send an id (the server assigns it)
   if (body.id !== undefined || body._id !== undefined) {
     throw new HTTPException(400, { message: 'do not include an id' });
   }
 
-  // --- build the new pokemon ---
   const pokemon = {
-    name: body.name || body.species,           // name defaults to species if absent
+    name: body.name || body.species,
     species: body.species,
-    owner: body.owner,
-    health: Math.floor(Math.random() * 100) + 1,  // random health between 1 and 100
-    level: Math.floor(Math.random() * 50) + 1,   // random level between 1 and 50
+    owner: username,  // owner is the logged-in user
+    health: Math.floor(Math.random() * 100) + 1,   // (use your existing ranges)
+    level: Math.floor(Math.random() * 50) + 1,
   };
 
   const created = await createPokemon(pokemon);
@@ -57,51 +53,71 @@ app.post('/api/pokemon', async (c) => {
 });
 
 
-// PATCH update provided fields
-app.patch('/api/pokemon/:id', async (c) => {
+app.delete('/api/pokemon/:id', async (c) => {
+  const username = requireUser(c);          // 401 if no cookie
   const id = c.req.param('id');
-  const body = await c.req.json();
 
-  // make sure it exists first
   const existing = await findPokemon(id);
   if (!existing) {
     throw new HTTPException(404, { message: 'Pokemon not found' });
   }
-
-  // --- validate the fields the client is trying to change ---
-  // never allow id to be changed
-  if (body.id !== undefined || body._id !== undefined) {
-    throw new HTTPException(400, { message: 'cannot change id' });
-  }
-  // if species or owner are provided, they must not be falsy
-  if (body.species !== undefined && !body.species) {
-    throw new HTTPException(400, { message: 'species cannot be empty' });
-  }
-  if (body.owner !== undefined && !body.owner) {
-    throw new HTTPException(400, { message: 'owner cannot be empty' });
-  }
-  // if health or level are provided, they must be numbers
-  if (body.health !== undefined && typeof body.health !== 'number') {
-    throw new HTTPException(400, { message: 'health must be a number' });
-  }
-  if (body.level !== undefined && typeof body.level !== 'number') {
-    throw new HTTPException(400, { message: 'level must be a number' });
+  // authorization: you can only delete YOUR pokemon
+  if ( existing.owner !== username) {
+    throw new HTTPException(403, { message: 'not your pokemon' });
   }
 
-  const updated = await updatePokemon(id, body);
-  return c.json(updated);
+  await deletePokemon(id);
+  return c.body(null, 204);
 });
 
-// DELETE a pokemon
-app.delete('/api/pokemon/:id', async (c) => {
-  const id = c.req.param('id');
 
-  const deleted = await deletePokemon(id);
-  if (!deleted) {
-    throw new HTTPException(404, { message: 'Pokemon not found' });
+app.get('/', (c) => c.text('Pokemon API is running'));
+
+// REGISTER: create a user and log them in via a cookie
+app.post('/user/register', async (c) => {
+  const body = await c.req.json();
+
+  if (!body.username || !body.password) {
+    throw new HTTPException(400, { message: 'username and password are required' });
+  }
+  // reject if the username is already taken
+  if (users.some((u) => u.username === body.username)) {
+    throw new HTTPException(409, { message: 'username already taken' });
   }
 
-  return c.body(null, 204);
+  const user = { username: body.username, password: body.password, createdAt: new Date() };
+  users.push(user);
+
+  setCookie(c, 'username', user.username, {
+    path: '/', httpOnly: true, sameSite: 'Lax', maxAge: 60 * 60 * 24,
+  });
+  return c.json({ username: user.username, createdAt: user.createdAt }, 201);
+});
+
+// LOGIN: check credentials, set the cookie on success
+app.post('/user/login', async (c) => {
+  const body = await c.req.json();
+
+  if (!body.username || !body.password) {
+    throw new HTTPException(400, { message: 'username and password are required' });
+  }
+  const user = users.find((u) => u.username === body.username);
+
+  // valid only if the user exists AND the password matches
+  if (!user || user.password !== body.password) {
+    throw new HTTPException(401, { message: 'invalid username or password' });
+  }
+
+  setCookie(c, 'username', user.username, {
+    path: '/', httpOnly: true, sameSite: 'Lax', maxAge: 60 * 60 * 24,
+  });
+  return c.json({ username: user.username }, 200);
+});
+
+// LOGOUT: clear the cookies
+app.post('/user/logout', (c) => {
+  deleteCookie(c, 'username', { path: '/' });
+  return c.json({ ok: true }, 200);
 });
 
 
