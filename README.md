@@ -98,6 +98,7 @@ curl -b cookies.txt -X POST http://localhost:3000/user/logout
 flags.)
 
 ## Project structure
+```
 .
 ├── server.js # Hono server: user routes + pokemon routes
 ├── db.js # MongoDB connection
@@ -105,6 +106,7 @@ flags.)
 │ └── pokemon.js # database access for pokemon
 ├── .env # MONGODB_URI (gitignored)
 └── .gitignore
+```
 
 
 ## Built with
